@@ -1,11 +1,12 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-let haptics: InstanceType<typeof import('web-haptics').WebHaptics> | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let haptics: any = null;
 if (typeof window !== 'undefined') {
   import('web-haptics').then((mod) => {
     haptics = new mod.WebHaptics();
-  });
+  }).catch(() => {});
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -160,30 +161,80 @@ function sampleImageColors(
   });
 }
 
-// ─── Slider Component ────────────────────────────────────────────────────────
+// ─── Slider Component — filled pill with drag ────────────────────────────────
 
-function Slider({
-  label, value, min, max, step, onChange,
-}: {
+function Slider({ label, value, min, max, step, onChange }: {
   label: string; value: number; min: number; max: number; step: number;
   onChange: (v: number) => void;
 }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const dragging = useRef(false);
+
+  const fraction = (value - min) / (max - min);
+  const textColor = fraction > 0.35 ? '#000' : '#fff';
+
+  function calcValue(clientX: number) {
+    const rect = ref.current!.getBoundingClientRect();
+    const x = Math.max(0, Math.min(clientX - rect.left, rect.width));
+    const raw = min + (x / rect.width) * (max - min);
+    const stepped = Math.round(raw / step) * step;
+    const clamped = Math.max(min, Math.min(max, parseFloat(stepped.toFixed(6))));
+    onChange(clamped);
+    try { haptics?.trigger('selection'); } catch {}
+  }
+
+  useEffect(() => {
+    function onMove(e: MouseEvent | TouchEvent) {
+      if (!dragging.current) return;
+      const cx = 'touches' in e ? e.touches[0].clientX : e.clientX;
+      calcValue(cx);
+    }
+    function onUp() { dragging.current = false; }
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    window.addEventListener('touchmove', onMove, { passive: false });
+    window.addEventListener('touchend', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      window.removeEventListener('touchmove', onMove);
+      window.removeEventListener('touchend', onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [min, max, step]);
+
   return (
-    <div style={{ marginBottom: 10 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
-        <span style={{ fontSize: 11, color: '#aaa' }}>{label}</span>
-        <span style={{ fontSize: 11, color: '#fff', fontVariantNumeric: 'tabular-nums' }}>
+    <div
+      ref={ref}
+      data-panel
+      onMouseDown={(e) => { dragging.current = true; calcValue(e.clientX); }}
+      onTouchStart={(e) => { dragging.current = true; calcValue(e.touches[0].clientX); }}
+      style={{
+        position: 'relative', height: 48, borderRadius: 12,
+        background: 'rgba(255,255,255,0.08)', marginBottom: 8, cursor: 'pointer',
+        overflow: 'hidden', userSelect: 'none', WebkitUserSelect: 'none',
+      }}
+    >
+      <div style={{
+        position: 'absolute', left: 0, top: 0, bottom: 0,
+        width: fraction * 100 + '%', background: 'rgba(255,255,255,0.9)', borderRadius: 12,
+      }} />
+      <div style={{
+        position: 'absolute', left: `calc(${fraction * 100}% - 1px)`,
+        top: 10, width: 2, height: 28,
+        background: fraction > 0.02 ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.2)',
+        borderRadius: 1,
+      }} />
+      <div style={{
+        position: 'relative', zIndex: 1, display: 'flex',
+        alignItems: 'center', justifyContent: 'space-between',
+        height: '100%', padding: '0 16px', pointerEvents: 'none',
+      }}>
+        <span style={{ fontSize: 14, fontWeight: 600, color: textColor }}>{label}</span>
+        <span style={{ fontSize: 14, fontWeight: 400, color: textColor, fontVariantNumeric: 'tabular-nums' }}>
           {step >= 1 ? value : value.toFixed(2)}
         </span>
       </div>
-      <input
-        type="range" min={min} max={max} step={step} value={value}
-        onChange={(e) => { onChange(parseFloat(e.target.value)); try { haptics?.trigger('selection'); } catch {} }}
-        style={{
-          width: '100%', height: 4, appearance: 'none',
-          background: '#444', borderRadius: 2, outline: 'none', cursor: 'pointer',
-        }}
-      />
     </div>
   );
 }
@@ -590,6 +641,12 @@ export default function Home() {
     };
   }, []);
 
+  // Dark theme colors
+  const t = {
+    bg: 'rgb(12, 12, 14)', btnBg: 'rgba(20,20,20,0.8)', btnBorder: '#333',
+    btnColor: '#888', btnHover: '#fff',
+  };
+
   return (
     <>
       <canvas
@@ -608,13 +665,13 @@ export default function Home() {
         style={{
           position: 'fixed', top: 12, left: 12,
           width: 44, height: 44, borderRadius: 10,
-          border: '1px solid #333', background: 'rgba(20,20,20,0.8)',
-          color: '#888', fontSize: 18, cursor: 'pointer',
+          border: `1px solid ${t.btnBorder}`, background: t.btnBg,
+          color: t.btnColor, fontSize: 18, cursor: 'pointer',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 1001, transition: 'color 0.2s',
+          zIndex: 1001, transition: 'all 0.2s',
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
-        onMouseLeave={(e) => (e.currentTarget.style.color = '#888')}
+        onMouseEnter={(e) => (e.currentTarget.style.color = t.btnHover)}
+        onMouseLeave={(e) => (e.currentTarget.style.color = t.btnColor)}
       >
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <rect x="2" y="2" width="20" height="20" rx="3"/>
@@ -630,20 +687,21 @@ export default function Home() {
         onChange={handleImageUpload}
       />
 
-      {/* Gear toggle */}
+      {/* Settings toggle */}
       <button
         data-panel
         onClick={() => setPanelOpen((o) => !o)}
         style={{
           position: 'fixed', top: 12, right: 12,
           width: 44, height: 44, borderRadius: 10,
-          border: '1px solid #333', background: 'rgba(20,20,20,0.8)',
-          color: '#888', fontSize: 18, cursor: 'pointer',
+          border: `1px solid ${t.btnBorder}`, background: t.btnBg,
+          color: t.btnColor,
+          fontSize: 18, cursor: 'pointer',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 1001, transition: 'color 0.2s',
+          zIndex: 1001, transition: 'all 0.2s',
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
-        onMouseLeave={(e) => (e.currentTarget.style.color = '#888')}
+        onMouseEnter={(e) => (e.currentTarget.style.color = t.btnHover)}
+        onMouseLeave={(e) => (e.currentTarget.style.color = t.btnColor)}
       >
         {panelOpen ? (
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -664,24 +722,27 @@ export default function Home() {
         data-panel
         style={{
           position: 'fixed', top: 0, right: 0,
-          width: 280, height: '100vh',
-          background: 'rgba(20,20,20,0.9)',
-          borderLeft: '1px solid #333',
+          width: 320, height: '100vh',
+          background: 'rgba(18,18,20,0.95)',
+          borderLeft: 'none',
+          borderRadius: '24px 0 0 24px',
+          boxShadow: '-4px 0 20px rgba(0,0,0,0.4)',
           padding: '60px 16px 16px',
-          fontFamily: 'ui-monospace, "SF Mono", "Cascadia Code", "Segoe UI Mono", monospace',
-          fontSize: 12, color: '#ccc', zIndex: 1000,
+          fontFamily: '-apple-system, BlinkMacSystemFont, system-ui, sans-serif',
+          fontSize: 14, color: '#fff', zIndex: 1000,
           transform: panelOpen ? 'translateX(0)' : 'translateX(100%)',
           transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
-          overflowY: 'auto', backdropFilter: 'blur(12px)',
+          overflowY: 'auto', backdropFilter: 'blur(20px)',
+          WebkitBackdropFilter: 'blur(20px)',
         }}
         onMouseDown={(e) => e.stopPropagation()}
         onTouchMove={(e) => e.stopPropagation()}
       >
-        <div style={{ marginBottom: 16, fontSize: 13, fontWeight: 600, color: '#fff' }}>
+        <div style={{ marginBottom: 20, fontSize: 18, fontWeight: 700, color: '#fff' }}>
           Dither Tool
         </div>
 
-        <div style={{ marginBottom: 14, fontSize: 11, color: '#666', borderBottom: '1px solid #333', paddingBottom: 8 }}>
+        <div style={{ margin: '16px 0 8px 4px', fontSize: 12, fontWeight: 500, color: 'rgba(255,255,255,0.3)', letterSpacing: 0.5, textTransform: 'uppercase' }}>
           POINTILLIST
         </div>
 
@@ -692,7 +753,7 @@ export default function Home() {
         <Slider label="Background Skip" value={params.bgSkip} min={200} max={255} step={1} onChange={(v) => setParams((p) => ({ ...p, bgSkip: v }))} />
         <Slider label="Corner Radius" value={params.cornerRadius} min={0} max={0.5} step={0.01} onChange={(v) => setParams((p) => ({ ...p, cornerRadius: v }))} />
 
-        <div style={{ marginTop: 14, marginBottom: 14, fontSize: 11, color: '#666', borderBottom: '1px solid #333', paddingBottom: 8 }}>
+        <div style={{ margin: '16px 0 8px 4px', fontSize: 12, fontWeight: 500, color: 'rgba(255,255,255,0.3)', letterSpacing: 0.5, textTransform: 'uppercase' }}>
           PHYSICS
         </div>
         <Slider label="Spring Stiffness" value={params.spring} min={0.01} max={0.1} step={0.005} onChange={(v) => setParams((p) => ({ ...p, spring: v }))} />
@@ -701,29 +762,29 @@ export default function Home() {
         <Slider label="Repulsion Strength" value={params.repulsionStrength} min={2} max={20} step={0.5} onChange={(v) => setParams((p) => ({ ...p, repulsionStrength: v }))} />
         <Slider label="Click Explosion Force" value={params.clickForce} min={5} max={50} step={1} onChange={(v) => setParams((p) => ({ ...p, clickForce: v }))} />
 
-        <div style={{ marginTop: 20, borderTop: '1px solid #333', paddingTop: 12 }}>
+        <div style={{ marginTop: 16 }}>
           <button
             style={{
-              width: '100%', padding: '8px 0',
-              background: '#333', border: '1px solid #444', borderRadius: 6,
-              color: '#aaa', fontSize: 11, fontFamily: 'inherit',
-              cursor: 'pointer', transition: 'background 0.2s',
+              width: '100%', height: 48,
+              background: 'rgba(255,255,255,0.08)', border: 'none', borderRadius: 12,
+              color: '#fff', fontSize: 14, fontWeight: 600, fontFamily: 'inherit',
+              cursor: 'pointer', transition: 'background 0.15s',
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = '#444')}
-            onMouseLeave={(e) => (e.currentTarget.style.background = '#333')}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.14)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
             onClick={() => setParams(DEFAULTS)}
           >
             Reset Defaults
           </button>
           <button
             style={{
-              width: '100%', padding: '8px 0', marginTop: 8,
-              background: '#2a2a3a', border: '1px solid #444', borderRadius: 6,
-              color: '#aaa', fontSize: 11, fontFamily: 'inherit',
-              cursor: 'pointer', transition: 'background 0.2s',
+              width: '100%', height: 48, marginTop: 8,
+              background: 'rgba(255,255,255,0.08)', border: 'none', borderRadius: 12,
+              color: '#fff', fontSize: 14, fontWeight: 600, fontFamily: 'inherit',
+              cursor: 'pointer', transition: 'background 0.15s',
             }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = '#3a3a4a')}
-            onMouseLeave={(e) => (e.currentTarget.style.background = '#2a2a3a')}
+            onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.14)')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.08)')}
             onClick={() => {
               const pts = stateRef.current.particles;
               if (!pts) return;
