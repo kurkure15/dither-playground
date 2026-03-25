@@ -1,6 +1,12 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
+let haptics: InstanceType<typeof import('web-haptics').WebHaptics> | null = null;
+if (typeof window !== 'undefined') {
+  import('web-haptics').then((mod) => {
+    haptics = new mod.WebHaptics();
+  });
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -29,7 +35,7 @@ const DEFAULTS: DitherParams = {
   damping: 0.7,
   repulsionRadius: 45,
   repulsionStrength: 2,
-  clickForce: 5,
+  clickForce: 12,
 };
 
 // ─── Colorful Pointillist Sampling ───────────────────────────────────────────
@@ -172,7 +178,7 @@ function Slider({
       </div>
       <input
         type="range" min={min} max={max} step={step} value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
+        onChange={(e) => { onChange(parseFloat(e.target.value)); try { haptics?.trigger('selection'); } catch {} }}
         style={{
           width: '100%', height: 4, appearance: 'none',
           background: '#444', borderRadius: 2, outline: 'none', cursor: 'pointer',
@@ -233,15 +239,30 @@ export default function Home() {
     ripples: [] as Ripple[],
     particles: null as Particles | null,
     params: DEFAULTS,
+    imageSrc: '/avatar.png',
     time: 0,
     ditherVersion: 0,
   });
 
   const [panelOpen, setPanelOpen] = useState(false);
   const [params, setParams] = useState<DitherParams>(DEFAULTS);
+  const [imageSrc, setImageSrc] = useState<string>('/avatar.png');
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  function handleImageUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const result = ev.target?.result as string;
+      if (result) setImageSrc(result);
+    };
+    reader.readAsDataURL(file);
+  }
 
   // Sync params to ref for animation loop
   stateRef.current.params = params;
+  stateRef.current.imageSrc = imageSrc;
 
   // Sample image colors & update targets
   useEffect(() => {
@@ -255,7 +276,7 @@ export default function Home() {
     const targetH = Math.min(h * 0.7, 400);
     const targetW = Math.min(w * 0.7, 400);
 
-    sampleImageColors('/avatar.png', p.dotCount, p.contrast, p.brightness, p.bgSkip, p.cornerRadius, targetW, targetH)
+    sampleImageColors(imageSrc, p.dotCount, p.contrast, p.brightness, p.bgSkip, p.cornerRadius, targetW, targetH)
       .then((dots) => {
         if (cancelled || version !== s.ditherVersion || dots.length === 0) return;
 
@@ -300,7 +321,7 @@ export default function Home() {
       });
 
     return () => { cancelled = true; };
-  }, [params.dotCount, params.contrast, params.brightness, params.bgSkip, params.cornerRadius]);
+  }, [params.dotCount, params.contrast, params.brightness, params.bgSkip, params.cornerRadius, imageSrc]);
 
   // Animation loop — runs once on mount
   useEffect(() => {
@@ -446,7 +467,7 @@ export default function Home() {
       const targetH = Math.min(h * 0.7, 400);
       const targetW = Math.min(w * 0.7, 400);
       const version = ++s.ditherVersion;
-      sampleImageColors('/avatar.png', p.dotCount, p.contrast, p.brightness, p.bgSkip, p.cornerRadius, targetW, targetH)
+      sampleImageColors(s.imageSrc, p.dotCount, p.contrast, p.brightness, p.bgSkip, p.cornerRadius, targetW, targetH)
         .then((dots) => {
           if (version !== s.ditherVersion || dots.length === 0) return;
           const particles = s.particles;
@@ -468,45 +489,22 @@ export default function Home() {
       stateRef.current.mouse.y = e.clientY;
     }
 
-    // Blob sound via Web Audio API
-    let audioCtx: AudioContext | null = null;
-    function playBlobSound() {
-      if (!audioCtx) audioCtx = new AudioContext();
-      const ctx = audioCtx;
-
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      const filter = ctx.createBiquadFilter();
-
-      osc.type = 'sine';
-      osc.frequency.setValueAtTime(180 + Math.random() * 60, ctx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(60 + Math.random() * 30, ctx.currentTime + 0.3);
-
-      filter.type = 'lowpass';
-      filter.frequency.setValueAtTime(800, ctx.currentTime);
-      filter.frequency.exponentialRampToValueAtTime(200, ctx.currentTime + 0.25);
-      filter.Q.value = 8;
-
-      gain.gain.setValueAtTime(0.15, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
-
-      osc.connect(filter);
-      filter.connect(gain);
-      gain.connect(ctx.destination);
-
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + 0.4);
-    }
-
+    let lastTouchEnd = 0;
     function handleClick(e: MouseEvent) {
+      // Skip synthesized click events from touch — touchEnd already handled it
+      if (Date.now() - lastTouchEnd < 500) return;
       if ((e.target as HTMLElement).closest('[data-panel]')) return;
+      const imgCx = window.innerWidth / 2;
+      const imgCy = window.innerHeight / 2;
+      const clickDist = Math.sqrt((e.clientX - imgCx) ** 2 + (e.clientY - imgCy) ** 2);
+      if (clickDist > 300) return;
       const cfg = stateRef.current.params;
       stateRef.current.ripples.push({
         x: e.clientX, y: e.clientY,
-        radius: 0, maxRadius: 450,
+        radius: 0, maxRadius: 300,
         speed: 7, strength: cfg.clickForce, width: 70,
       });
-      playBlobSound();
+      try { haptics?.trigger('medium'); } catch {}
     }
 
     function handleMouseLeave() {
@@ -523,6 +521,7 @@ export default function Home() {
       stateRef.current.mouse.x = touch.clientX;
       stateRef.current.mouse.y = touch.clientY;
       touchStart = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+      try { haptics?.trigger('light'); } catch {}
     }
 
     function handleTouchMove(e: TouchEvent) {
@@ -536,17 +535,39 @@ export default function Home() {
     function handleTouchEnd(e: TouchEvent) {
       if (touchStart) {
         const touch = e.changedTouches[0];
-        const elapsed = Date.now() - touchStart.time;
-        const dx = touch.clientX - touchStart.x;
-        const dy = touch.clientY - touchStart.y;
-        const moved = Math.sqrt(dx * dx + dy * dy);
-        if (elapsed < 300 && moved < 15) {
-          handleClick({ clientX: touch.clientX, clientY: touch.clientY, target: e.target } as unknown as MouseEvent);
+        if (touch) {
+          const tapX = touch.clientX;
+          const tapY = touch.clientY;
+          const elapsed = Date.now() - touchStart.time;
+          const dx = tapX - touchStart.x;
+          const dy = tapY - touchStart.y;
+          const moved = Math.sqrt(dx * dx + dy * dy);
+          if (elapsed < 300 && moved < 15) {
+            if (!(e.target as HTMLElement).closest('[data-panel]')) {
+              const imgCx = window.innerWidth / 2;
+              const imgCy = window.innerHeight / 2;
+              const tapDist = Math.sqrt((tapX - imgCx) ** 2 + (tapY - imgCy) ** 2);
+              if (tapDist <= 300) {
+              const cfg = stateRef.current.params;
+              stateRef.current.ripples.push({
+                x: tapX,
+                y: tapY,
+                radius: 0,
+                maxRadius: 300,
+                speed: 7,
+                strength: cfg.clickForce,
+                width: 70,
+              });
+              try { haptics?.trigger('medium'); } catch {}
+              }
+            }
+          }
         }
       }
       stateRef.current.mouse.x = -9999;
       stateRef.current.mouse.y = -9999;
       touchStart = null;
+      lastTouchEnd = Date.now();
     }
 
     window.addEventListener('resize', handleResize);
@@ -580,6 +601,35 @@ export default function Home() {
         }}
       />
 
+      {/* Image upload */}
+      <button
+        data-panel
+        onClick={() => fileInputRef.current?.click()}
+        style={{
+          position: 'fixed', top: 12, left: 12,
+          width: 44, height: 44, borderRadius: 10,
+          border: '1px solid #333', background: 'rgba(20,20,20,0.8)',
+          color: '#888', fontSize: 18, cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1001, transition: 'color 0.2s',
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
+        onMouseLeave={(e) => (e.currentTarget.style.color = '#888')}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="2" y="2" width="20" height="20" rx="3"/>
+          <circle cx="8" cy="8" r="2"/>
+          <path d="M22 16l-5.5-5.5L4 22"/>
+        </svg>
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: 'none' }}
+        onChange={handleImageUpload}
+      />
+
       {/* Gear toggle */}
       <button
         data-panel
@@ -595,10 +645,18 @@ export default function Home() {
         onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
         onMouseLeave={(e) => (e.currentTarget.style.color = '#888')}
       >
-        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="12" r="3" />
-          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-        </svg>
+        {panelOpen ? (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/>
+            <line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        ) : (
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="4" y1="6" x2="20" y2="6"/>
+            <line x1="4" y1="12" x2="20" y2="12"/>
+            <line x1="4" y1="18" x2="14" y2="18"/>
+          </svg>
+        )}
       </button>
 
       {/* Settings panel */}

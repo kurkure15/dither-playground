@@ -1,12 +1,8 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  webpack: (config, { dev }) => {
-    if (dev) {
-      // Use unique chunk IDs in dev to prevent stale cache errors on reload
-      config.output.chunkFilename = 'static/chunks/[name].[contenthash].js';
-    }
-    return config;
-  },
+  // Disable Strict Mode — prevents double-mount of effects in dev,
+  // which causes race conditions with async image loading + animation loops
+  reactStrictMode: false,
 };
 
 export default nextConfig;
