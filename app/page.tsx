@@ -1,101 +1,686 @@
-import Image from "next/image";
+'use client';
+
+import { useEffect, useRef, useState } from 'react';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface DitherParams {
+  dotCount: number;
+  dotRadius: number;
+  contrast: number;
+  brightness: number;
+  bgSkip: number;
+  cornerRadius: number;
+  spring: number;
+  damping: number;
+  repulsionRadius: number;
+  repulsionStrength: number;
+  clickForce: number;
+}
+
+const DEFAULTS: DitherParams = {
+  dotCount: 8000,
+  dotRadius: 1.2,
+  contrast: 1.2,
+  brightness: 1.0,
+  bgSkip: 240,
+  cornerRadius: 0.5,
+  spring: 0.05,
+  damping: 0.7,
+  repulsionRadius: 45,
+  repulsionStrength: 2,
+  clickForce: 5,
+};
+
+// ─── Colorful Pointillist Sampling ───────────────────────────────────────────
+
+interface ColorDot {
+  x: number; y: number;
+  r: number; g: number; b: number;
+}
+
+// iOS-style squircle: |x|^n + |y|^n <= 1 where n controls the shape
+// n=2 is a circle, n→∞ is a square, ~4-5 gives the iOS squircle feel
+function insideSquircle(x: number, y: number, hw: number, hh: number, radius: number): boolean {
+  if (radius <= 0) return true; // no rounding
+  // Normalize to [-1, 1]
+  const nx = Math.abs(x) / hw;
+  const ny = Math.abs(y) / hh;
+  // Only test corners — if within the inner rect, always inside
+  const cutoff = 1 - radius;
+  if (nx <= cutoff || ny <= cutoff) return true;
+  // Remap the corner region to [0,1]
+  const cx = (nx - cutoff) / radius;
+  const cy = (ny - cutoff) / radius;
+  // Squircle exponent ~4.5 for iOS feel
+  const n = 4.5;
+  return Math.pow(cx, n) + Math.pow(cy, n) <= 1;
+}
+
+function sampleImageColors(
+  imageSrc: string,
+  maxDots: number,
+  contrast: number,
+  brightness: number,
+  bgSkip: number,
+  cornerRadius: number,
+  targetWidth: number,
+  targetHeight: number,
+): Promise<ColorDot[]> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      const aspectRatio = img.width / img.height;
+      let dw: number, dh: number;
+      if (aspectRatio > targetWidth / targetHeight) {
+        dw = targetWidth;
+        dh = targetWidth / aspectRatio;
+      } else {
+        dh = targetHeight;
+        dw = targetHeight * aspectRatio;
+      }
+
+      const sw = Math.round(dw);
+      const sh = Math.round(dh);
+      if (sw <= 0 || sh <= 0) { resolve([]); return; }
+
+      const offscreen = document.createElement('canvas');
+      offscreen.width = sw;
+      offscreen.height = sh;
+      const ctx = offscreen.getContext('2d')!;
+      ctx.drawImage(img, 0, 0, sw, sh);
+      const imageData = ctx.getImageData(0, 0, sw, sh);
+      const data = imageData.data;
+
+      // Grid sampling with jitter
+      const spacing = Math.sqrt((sw * sh) / maxDots);
+      const dots: ColorDot[] = [];
+
+      for (let gy = spacing / 2; gy < sh; gy += spacing) {
+        for (let gx = spacing / 2; gx < sw; gx += spacing) {
+          // Add random jitter within the grid cell
+          const jx = gx + (Math.random() - 0.5) * spacing * 0.8;
+          const jy = gy + (Math.random() - 0.5) * spacing * 0.8;
+          const px = Math.floor(Math.max(0, Math.min(sw - 1, jx)));
+          const py = Math.floor(Math.max(0, Math.min(sh - 1, jy)));
+          const idx = (py * sw + px) * 4;
+
+          const a = data[idx + 3];
+          if (a < 20) continue; // skip transparent
+
+          let cr = data[idx];
+          let cg = data[idx + 1];
+          let cb = data[idx + 2];
+
+          // Luminance check — skip near-white background
+          const lum = 0.2126 * cr + 0.7152 * cg + 0.0722 * cb;
+          if (lum > bgSkip) continue;
+
+          // Squircle mask — skip dots outside the rounded shape
+          const dotX = jx - sw / 2;
+          const dotY = jy - sh / 2;
+          if (!insideSquircle(dotX, dotY, sw / 2, sh / 2, cornerRadius)) continue;
+
+          // Apply brightness then contrast
+          cr = Math.max(0, Math.min(255, cr * brightness));
+          cg = Math.max(0, Math.min(255, cg * brightness));
+          cb = Math.max(0, Math.min(255, cb * brightness));
+          cr = Math.max(0, Math.min(255, ((cr / 255 - 0.5) * contrast + 0.5) * 255));
+          cg = Math.max(0, Math.min(255, ((cg / 255 - 0.5) * contrast + 0.5) * 255));
+          cb = Math.max(0, Math.min(255, ((cb / 255 - 0.5) * contrast + 0.5) * 255));
+
+          dots.push({
+            x: jx - sw / 2,
+            y: jy - sh / 2,
+            r: cr, g: cg, b: cb,
+          });
+        }
+      }
+
+      // If we got more than maxDots, shuffle and trim
+      if (dots.length > maxDots) {
+        for (let i = dots.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          [dots[i], dots[j]] = [dots[j], dots[i]];
+        }
+        dots.length = maxDots;
+      }
+
+      resolve(dots);
+    };
+    img.onerror = () => resolve([]);
+    img.src = imageSrc;
+  });
+}
+
+// ─── Slider Component ────────────────────────────────────────────────────────
+
+function Slider({
+  label, value, min, max, step, onChange,
+}: {
+  label: string; value: number; min: number; max: number; step: number;
+  onChange: (v: number) => void;
+}) {
+  return (
+    <div style={{ marginBottom: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+        <span style={{ fontSize: 11, color: '#aaa' }}>{label}</span>
+        <span style={{ fontSize: 11, color: '#fff', fontVariantNumeric: 'tabular-nums' }}>
+          {step >= 1 ? value : value.toFixed(2)}
+        </span>
+      </div>
+      <input
+        type="range" min={min} max={max} step={step} value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        style={{
+          width: '100%', height: 4, appearance: 'none',
+          background: '#444', borderRadius: 2, outline: 'none', cursor: 'pointer',
+        }}
+      />
+    </div>
+  );
+}
+
+// ─── Particle data holder ────────────────────────────────────────────────────
+
+interface Particles {
+  posX: Float32Array; posY: Float32Array;
+  velX: Float32Array; velY: Float32Array;
+  targetX: Float32Array; targetY: Float32Array;
+  radii: Float32Array;
+  colorR: Float32Array; colorG: Float32Array; colorB: Float32Array;
+  phaseX: Float32Array; phaseY: Float32Array;
+  freqX: Float32Array; freqY: Float32Array;
+  lastDisturbed: Float64Array;
+  count: number;
+}
+
+function createParticles(count: number): Particles {
+  const p: Particles = {
+    posX: new Float32Array(count), posY: new Float32Array(count),
+    velX: new Float32Array(count), velY: new Float32Array(count),
+    targetX: new Float32Array(count), targetY: new Float32Array(count),
+    radii: new Float32Array(count),
+    colorR: new Float32Array(count), colorG: new Float32Array(count), colorB: new Float32Array(count),
+    phaseX: new Float32Array(count), phaseY: new Float32Array(count),
+    freqX: new Float32Array(count), freqY: new Float32Array(count),
+    lastDisturbed: new Float64Array(count),
+    count,
+  };
+  for (let i = 0; i < count; i++) {
+    p.radii[i] = 0.85 + Math.random() * 0.3;
+    p.phaseX[i] = Math.random() * Math.PI * 2;
+    p.phaseY[i] = Math.random() * Math.PI * 2;
+    p.freqX[i] = 0.3 + Math.random() * 0.7;
+    p.freqY[i] = 0.3 + Math.random() * 0.7;
+  }
+  return p;
+}
+
+// ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function Home() {
-  return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start">
-        <Image
-          className="dark:invert"
-          src="https://nextjs.org/icons/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol className="list-inside list-decimal text-sm text-center sm:text-left font-[family-name:var(--font-geist-mono)]">
-          <li className="mb-2">
-            Get started by editing{" "}
-            <code className="bg-black/[.05] dark:bg-white/[.06] px-1 py-0.5 rounded font-semibold">
-              app/page.tsx
-            </code>
-            .
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  interface Ripple {
+    x: number; y: number;
+    radius: number; maxRadius: number;
+    speed: number; strength: number; width: number;
+  }
 
-        <div className="flex gap-4 items-center flex-col sm:flex-row">
-          <a
-            className="rounded-full border border-solid border-transparent transition-colors flex items-center justify-center bg-foreground text-background gap-2 hover:bg-[#383838] dark:hover:bg-[#ccc] text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="https://nextjs.org/icons/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
-            />
-            Deploy now
-          </a>
-          <a
-            className="rounded-full border border-solid border-black/[.08] dark:border-white/[.145] transition-colors flex items-center justify-center hover:bg-[#f2f2f2] dark:hover:bg-[#1a1a1a] hover:border-transparent text-sm sm:text-base h-10 sm:h-12 px-4 sm:px-5 sm:min-w-44"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Read our docs
-          </a>
+  const stateRef = useRef({
+    mouse: { x: -9999, y: -9999 },
+    ripples: [] as Ripple[],
+    particles: null as Particles | null,
+    params: DEFAULTS,
+    time: 0,
+    ditherVersion: 0,
+  });
+
+  const [panelOpen, setPanelOpen] = useState(false);
+  const [params, setParams] = useState<DitherParams>(DEFAULTS);
+
+  // Sync params to ref for animation loop
+  stateRef.current.params = params;
+
+  // Sample image colors & update targets
+  useEffect(() => {
+    let cancelled = false;
+    const s = stateRef.current;
+    const p = s.params;
+    const version = ++s.ditherVersion;
+
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    const targetH = Math.min(h * 0.7, 400);
+    const targetW = Math.min(w * 0.7, 400);
+
+    sampleImageColors('/avatar.png', p.dotCount, p.contrast, p.brightness, p.bgSkip, p.cornerRadius, targetW, targetH)
+      .then((dots) => {
+        if (cancelled || version !== s.ditherVersion || dots.length === 0) return;
+
+        const count = dots.length;
+        const cx = w / 2;
+        const cy = h / 2;
+        const old = s.particles;
+        let particles: Particles;
+
+        if (!old || old.count !== count) {
+          particles = createParticles(count);
+          if (old) {
+            const copy = Math.min(old.count, count);
+            for (let i = 0; i < copy; i++) {
+              particles.posX[i] = old.posX[i];
+              particles.posY[i] = old.posY[i];
+              particles.velX[i] = old.velX[i];
+              particles.velY[i] = old.velY[i];
+            }
+            for (let i = copy; i < count; i++) {
+              particles.posX[i] = cx + (Math.random() - 0.5) * 400;
+              particles.posY[i] = cy + (Math.random() - 0.5) * 400;
+            }
+          } else {
+            for (let i = 0; i < count; i++) {
+              particles.posX[i] = cx + (Math.random() - 0.5) * w * 0.8;
+              particles.posY[i] = cy + (Math.random() - 0.5) * h * 0.8;
+            }
+          }
+          s.particles = particles;
+        } else {
+          particles = old;
+        }
+
+        for (let i = 0; i < count; i++) {
+          particles.targetX[i] = cx + dots[i].x;
+          particles.targetY[i] = cy + dots[i].y;
+          particles.colorR[i] = dots[i].r;
+          particles.colorG[i] = dots[i].g;
+          particles.colorB[i] = dots[i].b;
+        }
+      });
+
+    return () => { cancelled = true; };
+  }, [params.dotCount, params.contrast, params.brightness, params.bgSkip, params.cornerRadius]);
+
+  // Animation loop — runs once on mount
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d')!;
+    let animationId = 0;
+    let width = 0;
+    let height = 0;
+    let dpr = 1;
+
+    function resize() {
+      dpr = window.devicePixelRatio || 1;
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas!.width = width * dpr;
+      canvas!.height = height * dpr;
+      canvas!.style.width = width + 'px';
+      canvas!.style.height = height + 'px';
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    resize();
+
+    function animate() {
+      const s = stateRef.current;
+      const p = s.particles;
+      const cfg = s.params;
+      s.time += 0.016;
+      const time = s.time;
+
+      // Clear — dark charcoal background
+      ctx.fillStyle = 'rgb(12, 12, 14)';
+      ctx.fillRect(0, 0, width, height);
+
+      if (!p) {
+        animationId = requestAnimationFrame(animate);
+        return;
+      }
+
+      const mx = s.mouse.x;
+      const my = s.mouse.y;
+      const count = p.count;
+      const now = Date.now();
+
+      // Advance ripples
+      const ripples = s.ripples;
+      for (let r = 0; r < ripples.length; r++) {
+        ripples[r].radius += ripples[r].speed;
+      }
+      s.ripples = ripples.filter((r) => r.radius < r.maxRadius);
+
+      // Physics
+      for (let i = 0; i < count; i++) {
+        // Return delay
+        const sinceDist = now - p.lastDisturbed[i];
+        const returnFactor = sinceDist < 100 ? sinceDist / 100 : 1;
+        const springStr = cfg.spring * returnFactor;
+
+        // Spring
+        const dx = p.targetX[i] - p.posX[i];
+        const dy = p.targetY[i] - p.posY[i];
+        p.velX[i] += dx * springStr;
+        p.velY[i] += dy * springStr;
+
+        // Cursor repulsion — cubic falloff
+        const cdx = p.posX[i] - mx;
+        const cdy = p.posY[i] - my;
+        const dist = Math.sqrt(cdx * cdx + cdy * cdy);
+        if (dist < cfg.repulsionRadius && dist > 0) {
+          const t = 1 - dist / cfg.repulsionRadius;
+          const force = t * t * t;
+          const angle = Math.atan2(cdy, cdx);
+          p.velX[i] += Math.cos(angle) * force * cfg.repulsionStrength;
+          p.velY[i] += Math.sin(angle) * force * cfg.repulsionStrength;
+          p.lastDisturbed[i] = now;
+        }
+
+        // Ripple wave forces
+        for (let r = 0; r < s.ripples.length; r++) {
+          const rip = s.ripples[r];
+          const rdx = p.posX[i] - rip.x;
+          const rdy = p.posY[i] - rip.y;
+          const rdist = Math.sqrt(rdx * rdx + rdy * rdy);
+          const ringInner = rip.radius - rip.width / 2;
+          const ringOuter = rip.radius + rip.width / 2;
+          if (rdist > ringInner && rdist < ringOuter && rdist > 0) {
+            const t = 1 - Math.abs(rdist - rip.radius) / (rip.width / 2);
+            const fadeFactor = 1 - rip.radius / rip.maxRadius;
+            const force = t * t * fadeFactor * rip.strength * 0.6;
+            const angle = Math.atan2(rdy, rdx);
+            p.velX[i] += Math.cos(angle) * force;
+            p.velY[i] += Math.sin(angle) * force;
+            p.lastDisturbed[i] = now;
+          }
+        }
+
+        // Idle drift
+        p.velX[i] += Math.sin(time * p.freqX[i] + p.phaseX[i]) * 0.03;
+        p.velY[i] += Math.cos(time * p.freqY[i] + p.phaseY[i]) * 0.03;
+
+        // Damping
+        p.velX[i] *= cfg.damping;
+        p.velY[i] *= cfg.damping;
+
+        // Position
+        p.posX[i] += p.velX[i];
+        p.posY[i] += p.velY[i];
+      }
+
+      // Render — colored dots
+      const baseRadius = cfg.dotRadius;
+      for (let i = 0; i < count; i++) {
+        const r = p.radii[i] * baseRadius;
+        ctx.fillStyle = `rgb(${p.colorR[i] | 0},${p.colorG[i] | 0},${p.colorB[i] | 0})`;
+        ctx.beginPath();
+        ctx.arc(p.posX[i], p.posY[i], r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Faint expanding ripple rings
+      for (let r = 0; r < s.ripples.length; r++) {
+        const rip = s.ripples[r];
+        const alpha = 0.04 * (1 - rip.radius / rip.maxRadius);
+        ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(rip.x, rip.y, rip.radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      animationId = requestAnimationFrame(animate);
+    }
+
+    animationId = requestAnimationFrame(animate);
+
+    function handleResize() {
+      resize();
+      const s = stateRef.current;
+      const p = s.params;
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const targetH = Math.min(h * 0.7, 400);
+      const targetW = Math.min(w * 0.7, 400);
+      const version = ++s.ditherVersion;
+      sampleImageColors('/avatar.png', p.dotCount, p.contrast, p.brightness, p.bgSkip, p.cornerRadius, targetW, targetH)
+        .then((dots) => {
+          if (version !== s.ditherVersion || dots.length === 0) return;
+          const particles = s.particles;
+          if (!particles) return;
+          const cx = w / 2;
+          const cy = h / 2;
+          for (let i = 0; i < Math.min(particles.count, dots.length); i++) {
+            particles.targetX[i] = cx + dots[i].x;
+            particles.targetY[i] = cy + dots[i].y;
+            particles.colorR[i] = dots[i].r;
+            particles.colorG[i] = dots[i].g;
+            particles.colorB[i] = dots[i].b;
+          }
+        });
+    }
+
+    function handleMouseMove(e: MouseEvent) {
+      stateRef.current.mouse.x = e.clientX;
+      stateRef.current.mouse.y = e.clientY;
+    }
+
+    // Blob sound via Web Audio API
+    let audioCtx: AudioContext | null = null;
+    function playBlobSound() {
+      if (!audioCtx) audioCtx = new AudioContext();
+      const ctx = audioCtx;
+
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      const filter = ctx.createBiquadFilter();
+
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(180 + Math.random() * 60, ctx.currentTime);
+      osc.frequency.exponentialRampToValueAtTime(60 + Math.random() * 30, ctx.currentTime + 0.3);
+
+      filter.type = 'lowpass';
+      filter.frequency.setValueAtTime(800, ctx.currentTime);
+      filter.frequency.exponentialRampToValueAtTime(200, ctx.currentTime + 0.25);
+      filter.Q.value = 8;
+
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.35);
+
+      osc.connect(filter);
+      filter.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + 0.4);
+    }
+
+    function handleClick(e: MouseEvent) {
+      if ((e.target as HTMLElement).closest('[data-panel]')) return;
+      const cfg = stateRef.current.params;
+      stateRef.current.ripples.push({
+        x: e.clientX, y: e.clientY,
+        radius: 0, maxRadius: 450,
+        speed: 7, strength: cfg.clickForce, width: 70,
+      });
+      playBlobSound();
+    }
+
+    function handleMouseLeave() {
+      stateRef.current.mouse.x = -9999;
+      stateRef.current.mouse.y = -9999;
+    }
+
+    let touchStart: { x: number; y: number; time: number } | null = null;
+
+    function handleTouchStart(e: TouchEvent) {
+      if ((e.target as HTMLElement).closest('[data-panel]')) return;
+      e.preventDefault();
+      const touch = e.touches[0];
+      stateRef.current.mouse.x = touch.clientX;
+      stateRef.current.mouse.y = touch.clientY;
+      touchStart = { x: touch.clientX, y: touch.clientY, time: Date.now() };
+    }
+
+    function handleTouchMove(e: TouchEvent) {
+      if ((e.target as HTMLElement).closest('[data-panel]')) return;
+      e.preventDefault();
+      const touch = e.touches[0];
+      stateRef.current.mouse.x = touch.clientX;
+      stateRef.current.mouse.y = touch.clientY;
+    }
+
+    function handleTouchEnd(e: TouchEvent) {
+      if (touchStart) {
+        const touch = e.changedTouches[0];
+        const elapsed = Date.now() - touchStart.time;
+        const dx = touch.clientX - touchStart.x;
+        const dy = touch.clientY - touchStart.y;
+        const moved = Math.sqrt(dx * dx + dy * dy);
+        if (elapsed < 300 && moved < 15) {
+          handleClick({ clientX: touch.clientX, clientY: touch.clientY, target: e.target } as unknown as MouseEvent);
+        }
+      }
+      stateRef.current.mouse.x = -9999;
+      stateRef.current.mouse.y = -9999;
+      touchStart = null;
+    }
+
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('click', handleClick);
+    window.addEventListener('mouseleave', handleMouseLeave);
+    window.addEventListener('touchstart', handleTouchStart, { passive: false });
+    window.addEventListener('touchmove', handleTouchMove, { passive: false });
+    window.addEventListener('touchend', handleTouchEnd);
+
+    return () => {
+      cancelAnimationFrame(animationId);
+      window.removeEventListener('resize', handleResize);
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('click', handleClick);
+      window.removeEventListener('mouseleave', handleMouseLeave);
+      window.removeEventListener('touchstart', handleTouchStart);
+      window.removeEventListener('touchmove', handleTouchMove);
+      window.removeEventListener('touchend', handleTouchEnd);
+    };
+  }, []);
+
+  return (
+    <>
+      <canvas
+        ref={canvasRef}
+        style={{
+          position: 'fixed', top: 0, left: 0,
+          width: '100vw', height: '100vh',
+          background: 'rgb(12, 12, 14)', cursor: 'default', touchAction: 'none',
+        }}
+      />
+
+      {/* Gear toggle */}
+      <button
+        data-panel
+        onClick={() => setPanelOpen((o) => !o)}
+        style={{
+          position: 'fixed', top: 12, right: 12,
+          width: 44, height: 44, borderRadius: 10,
+          border: '1px solid #333', background: 'rgba(20,20,20,0.8)',
+          color: '#888', fontSize: 18, cursor: 'pointer',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          zIndex: 1001, transition: 'color 0.2s',
+        }}
+        onMouseEnter={(e) => (e.currentTarget.style.color = '#fff')}
+        onMouseLeave={(e) => (e.currentTarget.style.color = '#888')}
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+      </button>
+
+      {/* Settings panel */}
+      <div
+        data-panel
+        style={{
+          position: 'fixed', top: 0, right: 0,
+          width: 280, height: '100vh',
+          background: 'rgba(20,20,20,0.9)',
+          borderLeft: '1px solid #333',
+          padding: '60px 16px 16px',
+          fontFamily: 'ui-monospace, "SF Mono", "Cascadia Code", "Segoe UI Mono", monospace',
+          fontSize: 12, color: '#ccc', zIndex: 1000,
+          transform: panelOpen ? 'translateX(0)' : 'translateX(100%)',
+          transition: 'transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
+          overflowY: 'auto', backdropFilter: 'blur(12px)',
+        }}
+        onMouseDown={(e) => e.stopPropagation()}
+        onTouchMove={(e) => e.stopPropagation()}
+      >
+        <div style={{ marginBottom: 16, fontSize: 13, fontWeight: 600, color: '#fff' }}>
+          Dither Tool
         </div>
-      </main>
-      <footer className="row-start-3 flex gap-6 flex-wrap items-center justify-center">
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          className="flex items-center gap-2 hover:underline hover:underline-offset-4"
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="https://nextjs.org/icons/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+
+        <div style={{ marginBottom: 14, fontSize: 11, color: '#666', borderBottom: '1px solid #333', paddingBottom: 8 }}>
+          POINTILLIST
+        </div>
+
+        <Slider label="Dot Count" value={params.dotCount} min={1000} max={8000} step={100} onChange={(v) => setParams((p) => ({ ...p, dotCount: v }))} />
+        <Slider label="Dot Radius" value={params.dotRadius} min={0.5} max={4} step={0.1} onChange={(v) => setParams((p) => ({ ...p, dotRadius: v }))} />
+        <Slider label="Contrast" value={params.contrast} min={0.5} max={3} step={0.05} onChange={(v) => setParams((p) => ({ ...p, contrast: v }))} />
+        <Slider label="Brightness" value={params.brightness} min={0.5} max={2} step={0.05} onChange={(v) => setParams((p) => ({ ...p, brightness: v }))} />
+        <Slider label="Background Skip" value={params.bgSkip} min={200} max={255} step={1} onChange={(v) => setParams((p) => ({ ...p, bgSkip: v }))} />
+        <Slider label="Corner Radius" value={params.cornerRadius} min={0} max={0.5} step={0.01} onChange={(v) => setParams((p) => ({ ...p, cornerRadius: v }))} />
+
+        <div style={{ marginTop: 14, marginBottom: 14, fontSize: 11, color: '#666', borderBottom: '1px solid #333', paddingBottom: 8 }}>
+          PHYSICS
+        </div>
+        <Slider label="Spring Stiffness" value={params.spring} min={0.01} max={0.1} step={0.005} onChange={(v) => setParams((p) => ({ ...p, spring: v }))} />
+        <Slider label="Damping" value={params.damping} min={0.7} max={0.98} step={0.01} onChange={(v) => setParams((p) => ({ ...p, damping: v }))} />
+        <Slider label="Repulsion Radius" value={params.repulsionRadius} min={10} max={300} step={5} onChange={(v) => setParams((p) => ({ ...p, repulsionRadius: v }))} />
+        <Slider label="Repulsion Strength" value={params.repulsionStrength} min={2} max={20} step={0.5} onChange={(v) => setParams((p) => ({ ...p, repulsionStrength: v }))} />
+        <Slider label="Click Explosion Force" value={params.clickForce} min={5} max={50} step={1} onChange={(v) => setParams((p) => ({ ...p, clickForce: v }))} />
+
+        <div style={{ marginTop: 20, borderTop: '1px solid #333', paddingTop: 12 }}>
+          <button
+            style={{
+              width: '100%', padding: '8px 0',
+              background: '#333', border: '1px solid #444', borderRadius: 6,
+              color: '#aaa', fontSize: 11, fontFamily: 'inherit',
+              cursor: 'pointer', transition: 'background 0.2s',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = '#444')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = '#333')}
+            onClick={() => setParams(DEFAULTS)}
+          >
+            Reset Defaults
+          </button>
+          <button
+            style={{
+              width: '100%', padding: '8px 0', marginTop: 8,
+              background: '#2a2a3a', border: '1px solid #444', borderRadius: 6,
+              color: '#aaa', fontSize: 11, fontFamily: 'inherit',
+              cursor: 'pointer', transition: 'background 0.2s',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.background = '#3a3a4a')}
+            onMouseLeave={(e) => (e.currentTarget.style.background = '#2a2a3a')}
+            onClick={() => {
+              const pts = stateRef.current.particles;
+              if (!pts) return;
+              const coords = [];
+              for (let i = 0; i < pts.count; i++) {
+                coords.push({ x: Math.round(pts.targetX[i] * 100) / 100, y: Math.round(pts.targetY[i] * 100) / 100 });
+              }
+              console.log(JSON.stringify(coords, null, 2));
+              console.log(`Exported ${coords.length} coordinates`);
+            }}
+          >
+            Export Coordinates
+          </button>
+        </div>
+      </div>
+    </>
   );
 }
